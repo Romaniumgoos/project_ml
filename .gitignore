@@ -3,3 +3,4 @@ __pycache__/
 collector/data/
 data/*.jsonl
 .pytest_cache/
+*.zip
