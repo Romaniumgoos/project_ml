@@ -231,7 +231,12 @@ async function submitAttempt() {
   if (res) {
     S.results.push(res);
     let txt = `Прошлое задание: ${res.wpm} WPM, точность ${Math.round(res.acc * 100)}%`;
-    if (res.verdict) txt += ` · античит: ${res.verdict}`;
+    if (res.p_cheat !== null && res.p_cheat !== undefined) {
+      const pc = (x) => (x < 0.01 ? "<1" : x > 0.99 ? ">99" : Math.round(x * 100)) + "%";
+      const [lo, hi] = res.p_cheat_ci90.map(pc);
+      txt += ` · вероятность читерства ${pc(res.p_cheat)} (90% интервал ${lo === hi ? lo : lo + "–" + hi})`;
+    }
+    if (res.note) txt += ` · ${res.note}`;
     $("lastResult").textContent = txt;
   } else {
     $("lastResult").textContent = "Не удалось отправить попытку (нет связи?) — продолжаем.";

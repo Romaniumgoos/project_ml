@@ -139,9 +139,30 @@ def test_torch_models():
     assert E.shape == (10, 32) and np.allclose(np.linalg.norm(E, axis=1), 1, atol=1e-4)
 
 
+def test_cheat_probability_interval():
+    """Байесовская логрегрессия: интервал содержит точку, расширяется вдали от данных; Платт калибрует."""
+    from sklearn.datasets import make_classification
+    from keyml.models.calibration import BayesianLogReg, PlattScaler, CheatProbability
+    from keyml.metrics import ece
+    X, y = make_classification(1500, 8, random_state=1, weights=[0.7])
+    bl = BayesianLogReg(l2=1e-2).fit(X[:1000], y[:1000])
+    m, v = bl.logit_dist(X[1000:])
+    pl = PlattScaler().fit(m, y[1000:])
+    cp = CheatProbability(bl, pl, pi_data=float(y.mean()))
+    p, lo, hi = cp.predict(X[1000:])
+    assert np.all(lo <= p + 1e-9) and np.all(p <= hi + 1e-9)
+    _, v_far = bl.logit_dist(X[1000:1010] * 6)   # далеко от обучающих данных — дисперсия логита больше
+    assert np.all(v_far > v[:10])
+    assert ece(y[1000:], p) < 0.08
+    # сдвиг априорной вероятности уменьшает P при меньшей доле читеров
+    cp2 = CheatProbability(bl, pl, pi_data=float(y.mean()), pi_deploy=0.05)
+    assert np.all(cp2.predict(X[1000:])[0] <= p + 1e-9)
+
+
 if __name__ == "__main__":
     test_metrics()
     test_own_models_match_sklearn()
+    test_cheat_probability_interval()
     test_server_flow()
     test_torch_models()
     print("all tests passed")

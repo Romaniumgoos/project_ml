@@ -142,3 +142,35 @@ def adjusted_rand_index(a, b):
     exp = sa * sb / c2(len(a))
     mx = (sa + sb) / 2
     return float((sum_ij - exp) / (mx - exp)) if mx != exp else 1.0
+
+
+# ---------------------------------------------------------------- калибровка вероятностей
+def brier(y, p):
+    """Средний квадрат ошибки вероятности (0 — идеал, 0.25 — монетка)."""
+    return float(np.mean((np.asarray(p, float) - np.asarray(y, float)) ** 2))
+
+
+def log_loss(y, p):
+    p = np.clip(np.asarray(p, float), 1e-7, 1 - 1e-7)
+    y = np.asarray(y, float)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def reliability_curve(y, p, n_bins=10):
+    """Для каждого бина предсказанной вероятности: средний прогноз, реальная доля, размер."""
+    y, p = np.asarray(y, float), np.asarray(p, float)
+    edges = np.linspace(0, 1, n_bins + 1)
+    b = np.clip(np.digitize(p, edges) - 1, 0, n_bins - 1)
+    rows = []
+    for k in range(n_bins):
+        m = b == k
+        if m.any():
+            rows.append((float(p[m].mean()), float(y[m].mean()), int(m.sum())))
+    return rows
+
+
+def ece(y, p, n_bins=10):
+    """Expected Calibration Error: взвешенное |прогноз − реальная частота| по бинам."""
+    rows = reliability_curve(y, p, n_bins)
+    n = sum(r[2] for r in rows)
+    return float(sum(r[2] * abs(r[0] - r[1]) for r in rows) / max(n, 1))

@@ -12,9 +12,12 @@ import numpy as np
 from .bots import BOT_TYPES, generate_bots
 from .data import Attempt
 from .features import FeatureExtractor, calib_vector
-from .metrics import (StandardScaler, adjusted_rand_index, binary_report, eer, roc_auc,
-                      roc_curve, silhouette, stratified_group_kfold, tpr_at_fpr)
+from .metrics import (StandardScaler, adjusted_rand_index, binary_report, brier, ece, eer, log_loss,
+                      reliability_curve, roc_auc, roc_curve, silhouette, stratified_group_kfold,
+                      tpr_at_fpr)
 from .models.linear import LogisticRegressionNP, MLPNP
+from .models.calibration import (BayesianLogReg, CheatProbability, PlattScaler, Z90, _logit,
+                                 bootstrap_intervals)
 from .models.unsupervised import (GMMNP, KMeansNP, MahalanobisDetector, PCANP,
                                   ScaledManhattanDetector)
 from .profile import BigramPrior, bigram_latencies, key_errors, user_profile, adaptive_exercise
@@ -108,6 +111,8 @@ def anticheat_experiment(humans, cheats, out: Path, n_folds=5, use_torch=True, g
     lr_losses = None
     folds = list(stratified_group_kfold(groups, y, n_folds, seed))
     fold_X = []   # признаки всех попыток с популяционными таблицами, оценёнными на train-людях фолда
+    oof_m, oof_v = np.zeros(len(data)), np.zeros(len(data))   # апостериорный логит: среднее, дисперсия
+    boot = None
     for f, (tr, te) in enumerate(folds):
         log(f"античит: фолд {f + 1}/{n_folds} (train {len(tr)}, test {len(te)})")
         fe = FeatureExtractor().fit([data[i] for i in tr])
@@ -122,6 +127,11 @@ def anticheat_experiment(humans, cheats, out: Path, n_folds=5, use_torch=True, g
         for n, mk in sk.items():
             m = mk().fit(Xtr, y[tr])
             oof[n][te] = m.predict_proba(Xte)[:, 1]
+        bl = BayesianLogReg(l2=1e-2).fit(Xtr, y[tr])
+        oof_m[te], oof_v[te] = bl.logit_dist(Xte)
+        if f == 0:   # контроль: бутстреп-интервалы на первом фолде
+            blo, bhi = bootstrap_intervals(Xtr, y[tr], groups[tr], Xte, B=30, seed=seed)
+            boot = (te, blo, bhi)
         if use_torch and HAS_TORCH:
             from .models.seq_torch import predict_gru, train_gru_classifier
             str_ = [fe.sequence(data[i], 120) for i in tr]
@@ -139,6 +149,7 @@ def anticheat_experiment(humans, cheats, out: Path, n_folds=5, use_torch=True, g
                   "fpr@0.5": rep["fpr"], "tpr@fpr1%": tpr_at_fpr(y, p, 0.01),
                   "detect_rate_by_type@fpr1%": per_type}
         log(f"  {n}: AUC={res[n]['roc_auc']:.4f} F1={rep['f1']:.3f} TPR@1%FPR={res[n]['tpr@fpr1%']:.3f}")
+    calib = _calibration_block(y, btype, groups, folds, oof_m, oof_v, oof, boot, out)
     # ---- обобщение на неизвестный тип бота (leave-one-bot-type-out)
     loto = defaultdict(dict)
     types = [t for t in sorted(set(btype)) if t != "human"]
@@ -159,8 +170,10 @@ def anticheat_experiment(humans, cheats, out: Path, n_folds=5, use_torch=True, g
     # ---- финальная модель для сервера + важность признаков
     fe_all = FeatureExtractor().fit(data)
     X_all = fe_all.transform(data)
-    final = LogisticRegressionNP(l2=1e-2).fit(X_all, y)
-    imp = sorted(zip(fe_all.names, final.w), key=lambda t: -abs(t[1]))[:12]
+    final_bl = BayesianLogReg(l2=1e-2).fit(X_all, y)
+    platt_all = PlattScaler().fit(oof_m, y)
+    final = CheatProbability(final_bl, platt_all, pi_data=float(y.mean()))
+    imp = sorted(zip(fe_all.names, final_bl.base.w), key=lambda t: -abs(t[1]))[:12]
     # ---- графики
     plt = _plt()
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
@@ -195,11 +208,98 @@ def anticheat_experiment(humans, cheats, out: Path, n_folds=5, use_torch=True, g
     fig.tight_layout()
     fig.savefig(out / "fig_anticheat_features.png")
     plt.close(fig)
-    return {"models": res, "leave_one_type_out_auc": dict(loto),
+    return {"models": res, "calibration": calib, "leave_one_type_out_auc": dict(loto),
             "top_features_logreg": [(n, float(w)) for n, w in imp],
             "final_model": final.to_json(fe_all.names),
             "feature_tables": {"bigram_mu": {f"{a}>{b}": v for (a, b), v in fe_all.bigram_mu.items()},
                                "key_hold_mu": fe_all.key_hold_mu}}
+
+
+def _calibration_block(y, btype, groups, folds, oof_m, oof_v, oof, boot, out: Path) -> dict:
+    """Вероятность читерства + 90% интервал: калибровка, качество интервалов, сравнение с бутстрепом."""
+    mod = oof_m                                             # медиана апостериорного логита
+    sd = np.sqrt(oof_v)
+    p_raw = 1 / (1 + np.exp(-mod))                          # без калибровки (обучение со взвешиванием классов)
+    # Платт подбирается кросс-фиттингом: для фолда f — по out-of-fold предсказаниям остальных фолдов
+    p_cal, lo, hi = np.zeros(len(y)), np.zeros(len(y)), np.zeros(len(y))
+    for tr, te in folds:
+        pl = PlattScaler().fit(mod[tr], y[tr])
+        sig = lambda z: 1 / (1 + np.exp(-z))
+        p_cal[te] = sig(pl(mod[te]))
+        lo[te] = sig(pl(oof_m[te] - Z90 * sd[te]))
+        hi[te] = sig(pl(oof_m[te] + Z90 * sd[te]))
+    width = hi - lo
+    res = {"pi_data": float(y.mean())}
+    res["quality"] = {
+        name: {"Brier": brier(y, p), "log-loss": log_loss(y, p), "ECE": ece(y, p), "ROC-AUC": roc_auc(y, p)}
+        for name, p in [("LogReg, сырая вероятность", oof["LogReg (numpy, своя)"]),
+                        ("Байес. LogReg (Лаплас), без калибровки", p_raw),
+                        ("Байес. LogReg + Платт (итоговая)", p_cal),
+                        ("MLP, сырая вероятность", oof["MLP (numpy, своя)"])]}
+    # интервалы: уверенные (интервал не содержит 0.5) vs неуверенные
+    unsure = (lo < 0.5) & (hi > 0.5)
+    pred = (p_cal >= 0.5).astype(int)
+    res["intervals"] = {
+        "средняя ширина 90% интервала": float(width.mean()),
+        "медианная ширина": float(np.median(width)),
+        "доля «неуверенных» (интервал накрывает 50%)": float(unsure.mean()),
+        "ошибка среди уверенных": float((pred[~unsure] != y[~unsure]).mean()) if (~unsure).any() else float("nan"),
+        "ошибка среди неуверенных": float((pred[unsure] != y[unsure]).mean()) if unsure.any() else float("nan"),
+    }
+    # ошибка растёт с шириной интервала? (квартили ширины логит-интервала)
+    q = np.quantile(sd, [0.25, 0.5, 0.75])
+    bins = np.digitize(sd, q)
+    res["error_by_uncertainty"] = [
+        {"квартиль неопределённости": int(k + 1), "ср. ширина": float(width[bins == k].mean()),
+         "|p - y| (ср.)": float(np.abs(p_cal[bins == k] - y[bins == k]).mean()),
+         "n": int((bins == k).sum())} for k in range(4)]
+    # вероятность по типам попыток
+    res["by_type"] = {t: {"ср. P(читер)": float(p_cal[btype == t].mean()),
+                          "медиана P": float(np.median(p_cal[btype == t])),
+                          "медиана интервала": [float(np.median(lo[btype == t])), float(np.median(hi[btype == t]))]}
+                      for t in ["human"] + sorted(set(btype) - {"human"})}
+    # сдвиг априорной вероятности: что увидит сайт, если читеров среди попыток 5%
+    shift = float(_logit(0.05) - _logit(y.mean()))
+    p5 = 1 / (1 + np.exp(-(_logit(p_cal) + shift)))
+    res["prior_5pct"] = {t: float(np.median(p5[btype == t])) for t in ["human"] + sorted(set(btype) - {"human"})}
+    # контроль: интервалы Лапласа vs бутстреп по группам (в логит-шкале)
+    if boot is not None:
+        te, blo, bhi = boot
+        lw = 2 * Z90 * sd[te]
+        bw = bhi - blo
+        res["laplace_vs_bootstrap"] = {"ширина логит-интервала, Лаплас (ср.)": float(lw.mean()),
+                                       "ширина логит-интервала, бутстреп (ср.)": float(bw.mean()),
+                                       "корреляция ширин": float(np.corrcoef(lw, bw)[0, 1])}
+    # ---- графики
+    plt = _plt()
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.2))
+    for name, p in [("LogReg сырая", oof["LogReg (numpy, своя)"]), ("Байес + Платт", p_cal),
+                    ("MLP сырая", oof["MLP (numpy, своя)"])]:
+        rc = reliability_curve(y, p, 10)
+        ax[0].plot([r[0] for r in rc], [r[1] for r in rc], marker="o", label=f"{name} (ECE {ece(y, p):.3f})")
+    ax[0].plot([0, 1], [0, 1], "k--", lw=0.8)
+    ax[0].set_xlabel("предсказанная вероятность читерства")
+    ax[0].set_ylabel("реальная доля читеров")
+    ax[0].set_title("Калибровка (reliability diagram)")
+    ax[0].legend(fontsize=8)
+    rng = np.random.default_rng(0)
+    sel = np.sort(rng.choice(len(y), size=min(250, len(y)), replace=False))
+    sel = sel[np.argsort(p_cal[sel])]
+    xs = np.arange(len(sel))
+    ax[1].vlines(xs, lo[sel], hi[sel], color=np.where(y[sel] == 1, "#c0392b", "#2f6fde"), lw=1.0, alpha=0.7)
+    ax[1].scatter(xs, p_cal[sel], s=6, c=np.where(y[sel] == 1, "#c0392b", "#2f6fde"))
+    ax[1].axhline(0.5, color="k", lw=0.6, ls=":")
+    ax[1].set_title("P(читер) и 90% интервал (синий — люди, красный — боты)")
+    ax[1].set_xlabel("попытки, отсортированы по P")
+    for t, c in [("human", "black")] + [(t, None) for t in sorted(set(btype) - {"human"})]:
+        ax[2].hist(p_cal[btype == t], bins=30, range=(0, 1), histtype="step", lw=1.4, density=True, label=t, color=c)
+    ax[2].set_yscale("log")
+    ax[2].set_title("Распределение P(читер) по типам")
+    ax[2].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out / "fig_cheat_probability.png")
+    plt.close(fig)
+    return res
 
 
 # =====================================================================================

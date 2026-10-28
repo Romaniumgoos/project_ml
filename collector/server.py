@@ -10,6 +10,7 @@ WSGI-приложение `application` можно запускать:
   KT_DB             путь к SQLite (по умолчанию collector/data/keystrokes.db)
   KT_ADMIN_TOKEN    токен для выгрузки данных (/api/admin/export?token=...)
   KT_MIN_GAP_HOURS  минимум часов между сессиями одного человека (по умолчанию 8; 0 — без ограничения)
+  KT_CHEAT_PRIOR    априорная доля читеров на сайте для пересчёта вероятности по Байесу (по умолчанию 0.05)
   PORT              порт для локального запуска (по умолчанию 8000)
 """
 from __future__ import annotations
@@ -71,7 +72,8 @@ with db() as _c:
 
 # ---------------------------------------------------------------- онлайн-античит (опционально)
 class AntiCheat:
-    """Загружает логрегрессию, обученную scripts/run_experiments.py (collector/model/anticheat.json)."""
+    """Байесовская логрегрессия + калибровка Платта (collector/model/anticheat.json, создаётся
+    scripts/run_experiments.py). Возвращает P(читер) и 90% доверительный интервал."""
 
     def __init__(self):
         self.ok = False
@@ -79,24 +81,25 @@ class AntiCheat:
         try:
             import numpy as np
             from keyml.features import FeatureExtractor
-            from keyml.models.linear import LogisticRegressionNP
+            from keyml.models.calibration import CheatProbability
             d = json.loads(p.read_text(encoding="utf-8"))
             self.fe = FeatureExtractor()
             self.fe.bigram_mu = {tuple(k.split(">")): v for k, v in d["bigram_mu"].items()}
             self.fe.key_hold_mu = d["key_hold_mu"]
             self.fe.names = d["features"]
-            self.model = LogisticRegressionNP.from_json(d)
+            self.model = CheatProbability.from_json(d, pi_deploy=float(os.environ.get("KT_CHEAT_PRIOR", "0.05")))
             self.np = np
             self.ok = True
         except Exception as e:  # модели ещё нет — сервер работает без онлайн-оценки
             print("anticheat model not loaded:", e)
 
-    def score(self, att: Attempt) -> float | None:
+    def score(self, att: Attempt) -> dict | None:
         if not self.ok or len(att.keystrokes()) < 10:
             return None
         try:
             X = self.fe.transform([att])
-            return float(self.model.predict_proba(X)[0])
+            p, lo, hi = self.model.predict(X)
+            return {"p": round(float(p[0]), 4), "lo": round(float(lo[0]), 4), "hi": round(float(hi[0]), 4)}
         except Exception as e:  # модель от старой версии признаков — переобучите run_experiments.py
             print("anticheat scoring failed:", e)
             return None
@@ -282,7 +285,10 @@ def api_attempt(body, q):
         sno = int(body.get("session_no", 1))
         wpm, acc = wpm_acc(prompt, typed, clean)
         att = Attempt("tmp", uid, sno, kind, lang, prompt, clean, typed=typed, mode=mode)
-        score = ANTICHEAT.score(att)
+        cheat = ANTICHEAT.score(att)
+        score = cheat["p"] if cheat else None
+        if cheat:
+            flags["p_cheat_ci90"] = [cheat["lo"], cheat["hi"]]
         untrusted = sum(1 for e in clean if not e[4])
         if untrusted:
             flags["untrusted_events"] = untrusted
@@ -292,12 +298,9 @@ def api_attempt(body, q):
             (uid, sno, kind, lang, prompt, typed, json.dumps(clean), json.dumps(flags), mode,
              str(body.get("cheat_type") or "")[:40] or None,
              json.dumps(body.get("client") or {})[:2000], time.time(), wpm, acc, score))
-    verdict = None
-    if score is not None:
-        verdict = "похоже на бота" if score > 0.9 else ("подозрительно" if score > 0.6 else "человек")
-    if untrusted:
-        verdict = "синтетические события (isTrusted=false)"
-    return 200, {"wpm": wpm, "acc": acc, "bot_score": score, "verdict": verdict}
+    note = "синтетические события (isTrusted=false)" if untrusted else None
+    return 200, {"wpm": wpm, "acc": acc, "p_cheat": cheat["p"] if cheat else None,
+                 "p_cheat_ci90": [cheat["lo"], cheat["hi"]] if cheat else None, "note": note}
 
 
 def api_profile(body, q):
@@ -320,7 +323,7 @@ def api_leaderboard(body, q):
         rows = con.execute(
             "SELECT u.nickname, ROUND(MAX(a.wpm),1) AS best, ROUND(AVG(a.acc),3) AS acc, "
             "COUNT(DISTINCT a.session_no) AS sessions FROM attempts a JOIN users u ON u.id=a.user_id "
-            "WHERE a.mode='normal' AND a.kind='text' AND a.acc>=0.9 AND (a.bot_score IS NULL OR a.bot_score<0.9) "
+            "WHERE a.mode='normal' AND a.kind='text' AND a.acc>=0.9 AND (a.bot_score IS NULL OR a.bot_score<0.5) "
             "GROUP BY a.user_id ORDER BY best DESC LIMIT 15").fetchall()
         tot = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         att = con.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
