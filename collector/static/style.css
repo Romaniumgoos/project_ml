@@ -34,6 +34,7 @@ button.big { font-size: 18px; padding: 14px 32px; margin-top: 8px; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 details { margin-top: 16px; }
 .code { font-family: ui-monospace, Consolas, monospace; letter-spacing: 1px; }
+.debug-banner { background: #6a4bc4; color: #fff; text-align: center; padding: 8px; font-weight: 600; }
 .cheat-banner { background: #b3261e; color: #fff; text-align: center; padding: 10px; font-weight: 600; }
 .sessions { display: flex; gap: 8px; }
 .dot { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--line); display: grid;

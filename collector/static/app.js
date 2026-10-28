@@ -1,6 +1,8 @@
 "use strict";
 // ================================================================ состояние
 const CHEAT = new URLSearchParams(location.search).get("cheat") === "1";
+// режим отладки: /?debug=<токен из KT_DEBUG_TOKEN> — без дневного лимита сессий
+const DEBUG = new URLSearchParams(location.search).get("debug") || "";
 const S = { uid: null, me: null, plan: [], idx: 0, total: 0, offset: 0, sessionNo: 0,
             att: null, results: [] };
 const $ = (id) => document.getElementById(id);
@@ -61,26 +63,28 @@ function fmtWait(sec) {
 }
 
 async function openHome() {
-  S.me = await api(`/api/me?uid=${encodeURIComponent(S.uid)}`);
+  S.me = await api(`/api/me?uid=${encodeURIComponent(S.uid)}&debug=${encodeURIComponent(DEBUG)}`);
+  $("debugBanner").classList.toggle("hidden", !S.me.debug);
   show("scrHome");
   $("whoami").textContent = `${S.me.nickname} · ${S.uid}`;
   $("helloName").textContent = `Привет, ${S.me.nickname}!`;
   $("myCode").textContent = S.uid;
   const done = S.me.sessions.filter(s => s.attempts >= 16).length;
-  $("sessionDots").innerHTML = [1, 2, 3].map(i => `<div class="dot ${i <= done ? "done" : ""}">${i}</div>`).join("");
+  $("sessionDots").innerHTML = Array.from({ length: Math.max(3, done + 1) }, (_, k) => k + 1).map(i => `<div class="dot ${i <= done ? "done" : ""}">${i}</div>`).join("");
   $("cheatTypeRow").style.display = CHEAT ? "" : "none";
   const btn = $("btnStart");
   btn.disabled = false;
   if (CHEAT) {
     $("startHint").textContent = "Каждая попытка в этом режиме попадёт в датасет как пример читера.";
-  } else if (S.me.wait_seconds > 0 && done > 0) {
+  } else if (S.me.wait_seconds > 0) {
     btn.disabled = true;
-    $("startHint").textContent = `Следующая сессия откроется через ${fmtWait(S.me.wait_seconds)} — `
-      + "для биометрии нам важны данные из разных дней.";
+    $("startHint").textContent = `На сегодня все ${S.me.max_per_day} сессии пройдены, спасибо! Новые откроются `
+      + `через ${fmtWait(S.me.wait_seconds)} (после полуночи) — данные из разных дней особенно ценны.`;
   } else {
-    $("startHint").textContent = done >= 3
-      ? "Все 3 сессии пройдены — спасибо! Можно продолжать тренироваться, это тоже полезно."
-      : `Сессия ${done + 1} из 3: калибровочная фраза ×10 и несколько текстов (~6 минут).`;
+    const left = S.me.max_per_day > 0 ? S.me.max_per_day - S.me.sessions_today : null;
+    $("startHint").textContent = `Сессия ${done + 1}: калибровочная фраза ×10 и несколько текстов (~6 минут). `
+      + (S.me.debug ? "Режим отладки: лимит сессий отключён."
+         : left !== null ? `Сегодня можно пройти ещё ${left} из ${S.me.max_per_day}.` : "");
   }
   loadProfile($("profileBox"));
   loadLeaders();
@@ -124,7 +128,7 @@ async function loadProfile(box) {
 $("btnStart").addEventListener("click", async () => {
   try {
     const r = await api("/api/session/start", { uid: S.uid, mode: CHEAT ? "cheat" : "normal",
-                                                 cheat_type: CHEAT ? $("cheatType").value : null });
+                                                 cheat_type: CHEAT ? $("cheatType").value : null, debug: DEBUG });
     Object.assign(S, { plan: r.plan, idx: 0, total: r.total, offset: r.offset, sessionNo: r.session_no, results: [] });
     show("scrType");
     nextAttempt();
@@ -221,7 +225,7 @@ async function submitAttempt() {
   const a = S.att;
   const body = { uid: S.uid, session_no: S.sessionNo, kind: a.item.kind, lang: a.item.lang,
                  prompt: a.item.prompt, typed: a.typed, events: a.events, flags: a.flags,
-                 mode: CHEAT ? "cheat" : "normal", cheat_type: CHEAT ? $("cheatType").value : null,
+                 mode: CHEAT ? "cheat" : "normal", cheat_type: CHEAT ? $("cheatType").value : null, debug: DEBUG,
                  client: { timer_res_ms: CLIENT.timer_res_ms } };
   let res = null;
   for (let tries = 0; tries < 3 && !res; tries++) {
@@ -252,7 +256,7 @@ async function finishSession() {
   $("doneStats").innerHTML = `<div><b>${avg("wpm").toFixed(0)}</b>средний WPM</div>
     <div><b>${Math.round(avg("acc") * 100)}%</b>точность</div><div><b>${rs.length}</b>заданий</div>`;
   $("doneNext").textContent = CHEAT ? "" :
-    "Вернитесь завтра (или позже) по той же ссылке — нужно 3 сессии в разные дни. "
+    "Можно начать ещё одну сессию из кабинета (до 3 в день). Для исследования особенно полезно вернуться и в другой день. "
     + `Ваш код: ${S.uid}`;
   $("doneProfile").innerHTML = "";
   if (!CHEAT) loadProfile($("doneProfile"));

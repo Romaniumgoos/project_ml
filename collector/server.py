@@ -9,7 +9,9 @@ WSGI-приложение `application` можно запускать:
 Переменные окружения:
   KT_DB             путь к SQLite (по умолчанию collector/data/keystrokes.db)
   KT_ADMIN_TOKEN    токен для выгрузки данных (/api/admin/export?token=...)
-  KT_MIN_GAP_HOURS  минимум часов между сессиями одного человека (по умолчанию 8; 0 — без ограничения)
+  KT_MAX_SESSIONS_PER_DAY  сколько обычных сессий участник может начать за календарные сутки (по умолчанию 3; 0 — без лимита)
+  KT_TZ_OFFSET_HOURS       часовой пояс для границы суток (по умолчанию 3 — Минск)
+  KT_DEBUG_TOKEN    секрет режима отладки: ссылка /?debug=<токен> снимает дневной лимит (пусто — режим выключен)
   KT_CHEAT_PRIOR    априорная доля читеров на сайте для пересчёта вероятности по Байесу (по умолчанию 0.05)
   PORT              порт для локального запуска (по умолчанию 8000)
 """
@@ -39,7 +41,9 @@ from keyml.profile import (BigramPrior, adaptive_exercise, bigram_latencies,  # 
 
 DB_PATH = Path(os.environ.get("KT_DB", HERE / "data" / "keystrokes.db"))
 ADMIN_TOKEN = os.environ.get("KT_ADMIN_TOKEN", "change-me")
-MIN_GAP_H = float(os.environ.get("KT_MIN_GAP_HOURS", "8"))
+MAX_PER_DAY = int(os.environ.get("KT_MAX_SESSIONS_PER_DAY", "3"))
+TZ_OFFSET_H = float(os.environ.get("KT_TZ_OFFSET_HOURS", "3"))
+DEBUG_TOKEN = os.environ.get("KT_DEBUG_TOKEN", "")
 STATIC = HERE / "static"
 MAX_BODY = 2_000_000
 CALIB_REPS = 10
@@ -68,6 +72,28 @@ def db():
 
 with db() as _c:
     _c.executescript(SCHEMA)
+    try:   # миграция старых баз: отметка отладочных сессий
+        _c.execute("ALTER TABLE sessions ADD COLUMN debug INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+
+def is_debug(token) -> bool:
+    return bool(DEBUG_TOKEN) and isinstance(token, str) and secrets.compare_digest(token, DEBUG_TOKEN)
+
+
+def day_bounds(now: float | None = None) -> tuple[float, float]:
+    """Начало текущих суток и следующей полуночи (unix-время) в часовом поясе участников."""
+    now = time.time() if now is None else now
+    off = TZ_OFFSET_H * 3600
+    start = (now + off) // 86400 * 86400 - off
+    return start, start + 86400
+
+
+def sessions_today(con, uid) -> int:
+    start, _ = day_bounds()
+    return con.execute("SELECT COUNT(*) FROM sessions WHERE user_id=? AND mode='normal' "
+                       "AND COALESCE(debug,0)=0 AND started>=?", (uid, start)).fetchone()[0]
 
 
 # ---------------------------------------------------------------- онлайн-античит (опционально)
@@ -211,19 +237,23 @@ def api_me(body, q):
         if not u:
             return 404, {"error": "Код не найден"}
         done = sessions_done(con, uid)
-        last = max((s["started"] for s in done), default=0)
-        wait = max(0.0, MIN_GAP_H * 3600 - (time.time() - last)) if done else 0.0
+        debug = is_debug(q.get("debug", [""])[0])
+        today = sessions_today(con, uid)
+        complete_last = not done or done[-1]["attempts"] >= CALIB_REPS + TEXTS_PER_SESSION
+        limit_hit = (not debug and MAX_PER_DAY > 0 and today >= MAX_PER_DAY and complete_last)
+        wait = day_bounds()[1] - time.time() if limit_hit else 0.0
         best = con.execute("SELECT MAX(wpm) FROM attempts WHERE user_id=? AND mode='normal' AND kind='text' "
                            "AND acc>=0.9", (uid,)).fetchone()[0]
     return 200, {"user_id": uid, "nickname": u["nickname"], "meta": json.loads(u["meta"] or "{}"),
                  "sessions": done, "wait_seconds": int(wait), "best_wpm": best,
-                 "min_gap_hours": MIN_GAP_H}
+                 "sessions_today": today, "max_per_day": MAX_PER_DAY, "debug": debug}
 
 
 def api_session_start(body, q):
     uid = str(body.get("uid", "")).upper()
     mode = "cheat" if body.get("mode") == "cheat" else "normal"
     cheat_type = str(body.get("cheat_type") or "")[:40] or None
+    debug = is_debug(body.get("debug"))
     with db() as con:
         u = user_row(con, uid)
         if not u:
@@ -236,16 +266,15 @@ def api_session_start(body, q):
             # незаконченную сессию продолжаем, а не начинаем новую
             sno = done[-1]["session_no"]
         else:
-            if mode == "normal" and done and MIN_GAP_H > 0:
-                last = max(s["started"] for s in done)
-                if time.time() - last < MIN_GAP_H * 3600:
-                    return 429, {"error": "Следующая сессия станет доступна позже — нам нужны данные "
-                                          "из разных дней", "wait_seconds": int(MIN_GAP_H * 3600 - (time.time() - last))}
+            if mode == "normal" and not debug and MAX_PER_DAY > 0 and sessions_today(con, uid) >= MAX_PER_DAY:
+                return 429, {"error": f"На сегодня все {MAX_PER_DAY} сессии пройдены — приходите завтра. "
+                                      "Данные из разных дней для исследования особенно ценны.",
+                             "wait_seconds": int(day_bounds()[1] - time.time())}
             r = con.execute("SELECT MAX(session_no) FROM sessions WHERE user_id=? AND mode=?",
                             (uid, mode)).fetchone()[0]
             sno = (r or 0) + 1
-            con.execute("INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?)",
-                        (uid, sno, time.time(), mode, cheat_type))
+            con.execute("INSERT OR REPLACE INTO sessions (user_id, session_no, started, mode, cheat_type, debug) "
+                        "VALUES (?,?,?,?,?,?)", (uid, sno, time.time(), mode, cheat_type, int(debug)))
         reps = CALIB_REPS if mode == "normal" else 4
         plan = [{"kind": "calib", "lang": lang, "prompt": corpus.CALIB[lang]} for _ in range(reps)]
         rng = random.Random(f"{uid}-{sno}-{mode}")
@@ -289,6 +318,10 @@ def api_attempt(body, q):
         score = cheat["p"] if cheat else None
         if cheat:
             flags["p_cheat_ci90"] = [cheat["lo"], cheat["hi"]]
+        if is_debug(body.get("debug")):
+            flags["debug"] = 1          # отладочные попытки можно отфильтровать при анализе
+        else:
+            flags.pop("debug", None)
         untrusted = sum(1 for e in clean if not e[4])
         if untrusted:
             flags["untrusted_events"] = untrusted

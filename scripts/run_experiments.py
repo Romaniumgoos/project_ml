@@ -168,6 +168,7 @@ def main():
     ap.add_argument("--fast", action="store_true", help="меньше эпох, без LOTO для GRU")
     ap.add_argument("--out", default=str(ROOT / "reports"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--keep-debug", action="store_true", help="не выбрасывать попытки из режима отладки")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -179,6 +180,8 @@ def main():
         real_cheats = []
     elif args.data:
         allA = [a for p in args.data for a in load_any(p)]
+        if not args.keep_debug:      # попытки из режима отладки (/?debug=...) в датасет не идут
+            allA = [a for a in allA if not (a.flags or {}).get("debug")]
         humans = [a for a in allA if a.label == 0]
         real_cheats = [a for a in allA if a.label == 1]
     else:

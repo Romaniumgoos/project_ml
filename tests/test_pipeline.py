@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 TMP = tempfile.mkdtemp()
 os.environ["KT_DB"] = os.path.join(TMP, "test.db")
-os.environ["KT_MIN_GAP_HOURS"] = "8"
+os.environ["KT_MAX_SESSIONS_PER_DAY"] = "3"
+os.environ["KT_DEBUG_TOKEN"] = "dbg-token"
 os.environ["KT_ADMIN_TOKEN"] = "secret"
 
 import numpy as np  # noqa: E402
@@ -60,9 +61,6 @@ def test_server_flow():
                                                       "typed": item["prompt"], "events": ev})
             assert code == 200, res
             assert res["wpm"] > 5
-    # вторая сессия сразу — запрещена (нужен другой день)
-    code, r = call("POST", "/api/session/start", {"uid": uids[0]})
-    assert code == 429
     # режим читера разрешён всегда и нумеруется отдельно
     code, r = call("POST", "/api/session/start", {"uid": uids[0], "mode": "cheat", "cheat_type": "ahk"})
     assert code == 200 and r["mode"] == "cheat"
@@ -159,10 +157,56 @@ def test_cheat_probability_interval():
     assert np.all(cp2.predict(X[1000:])[0] <= p + 1e-9)
 
 
+def _play_session(uid, debug="", seed=0):
+    import random
+    rng = random.Random(seed)
+    sim = SimUser.random(uid, seed)
+    code, s = call("POST", "/api/session/start", {"uid": uid, "mode": "normal", "debug": debug})
+    if code != 200:
+        return code, s
+    for item in s["plan"]:
+        ev = sim.type_text(item["prompt"], item["lang"], 1, 0, rng)
+        c, res = call("POST", "/api/attempt", {"uid": uid, "session_no": s["session_no"], "kind": item["kind"],
+                                               "lang": item["lang"], "prompt": item["prompt"],
+                                               "typed": item["prompt"], "events": ev, "debug": debug})
+        assert c == 200
+    return code, s
+
+
+def test_daily_limit_and_debug():
+    code, r = call("POST", "/api/register", {"nickname": "lim", "consent": True, "meta": {"lang": "en"}})
+    uid = r["user_id"]
+    for k in range(3):                                   # 3 сессии в день разрешены
+        code, s = _play_session(uid, seed=k)
+        assert code == 200 and s["session_no"] == k + 1
+    code, me = call("GET", "/api/me", query=f"uid={uid}")
+    assert me["sessions_today"] == 3 and me["wait_seconds"] > 0 and not me["debug"]
+    code, s = call("POST", "/api/session/start", {"uid": uid})          # четвёртая — нельзя
+    assert code == 429
+    code, s = call("POST", "/api/session/start", {"uid": uid, "debug": "wrong"})
+    assert code == 429                                                    # чужой токен не помогает
+    code, me = call("GET", "/api/me", query=f"uid={uid}&debug=dbg-token")
+    assert me["debug"] and me["wait_seconds"] == 0
+    for k in range(3):                                   # в режиме отладки — без лимита
+        code, s = _play_session(uid, debug="dbg-token", seed=10 + k)
+        assert code == 200
+    code, me = call("GET", "/api/me", query=f"uid={uid}")
+    assert me["sessions_today"] == 3                     # отладочные сессии лимит не расходуют
+    import sqlite3
+    con = sqlite3.connect(os.environ["KT_DB"])
+    flags = [json.loads(f) for (f,) in con.execute("SELECT flags FROM attempts WHERE user_id=?", (uid,))]
+    n_debug = sum(f.get("debug", 0) for f in flags)
+    assert n_debug >= 3 * 16 and len(flags) - n_debug >= 3 * 16   # обычные попытки без флага
+    # граница суток — полночь по Минску (UTC+3)
+    start, end = server.day_bounds(1_700_000_000)        # 2023-11-14 22:13 UTC = 01:13 по Минску
+    assert end - start == 86400 and (start + 3 * 3600) % 86400 == 0
+
+
 if __name__ == "__main__":
     test_metrics()
     test_own_models_match_sklearn()
     test_cheat_probability_interval()
     test_server_flow()
+    test_daily_limit_and_debug()
     test_torch_models()
     print("all tests passed")
