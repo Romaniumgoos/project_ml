@@ -159,7 +159,7 @@ def generate_bots(n_instances_per_type: int = 6, attempts_per_instance: int = 12
             lang = "ru" if rng.random() < 0.8 else "en"
             for j in range(attempts_per_instance):
                 kind = "calib" if j % 2 == 0 else "text"
-                prompt = corpus.CALIB[lang] if kind == "calib" else rng.choice(corpus.TEXTS[lang])
+                prompt = corpus.CALIB[lang] if kind == "calib" else corpus.random_task(lang, rng)
                 ev = bot.type_text(prompt, lang)
                 out.append(Attempt(f"b{aid}", bot.id, 1, kind, lang, prompt, ev, typed=prompt,
                                    mode="cheat", cheat_type=t, source="bot", label=1, bot_type=t))

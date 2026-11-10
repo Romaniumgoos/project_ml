@@ -53,7 +53,7 @@ def test_server_flow():
     for i, uid in enumerate(uids):
         sim = SimUser.random(uid, i)
         code, s = call("POST", "/api/session/start", {"uid": uid, "mode": "normal"})
-        assert code == 200 and s["session_no"] == 1 and len(s["plan"]) == 16
+        assert code == 200 and s["session_no"] == 1 and len(s["plan"]) == 12
         for item in s["plan"]:
             ev = sim.type_text(item["prompt"], item["lang"], 1, 0, rng)
             code, res = call("POST", "/api/attempt", {"uid": uid, "session_no": 1, "kind": item["kind"],
@@ -76,8 +76,8 @@ def test_server_flow():
     out = Path(TMP) / "export.jsonl"
     out.write_bytes(data if isinstance(data, bytes) else json.dumps(data).encode())
     atts = load_jsonl(out)
-    assert len(atts) == 6 * 16
-    assert len(load_sqlite(os.environ["KT_DB"])) == 6 * 16
+    assert len(atts) == 6 * 12
+    assert len(load_sqlite(os.environ["KT_DB"])) == 6 * 12
     assert all(len(a.keystrokes()) > 10 for a in atts)
 
 
@@ -196,10 +196,35 @@ def test_daily_limit_and_debug():
     con = sqlite3.connect(os.environ["KT_DB"])
     flags = [json.loads(f) for (f,) in con.execute("SELECT flags FROM attempts WHERE user_id=?", (uid,))]
     n_debug = sum(f.get("debug", 0) for f in flags)
-    assert n_debug >= 3 * 16 and len(flags) - n_debug >= 3 * 16   # обычные попытки без флага
+    assert n_debug >= 3 * 12 and len(flags) - n_debug >= 3 * 12   # обычные попытки без флага
     # граница суток — полночь по Минску (UTC+3)
     start, end = server.day_bounds(1_700_000_000)        # 2023-11-14 22:13 UTC = 01:13 по Минску
     assert end - start == 86400 and (start + 3 * 3600) % 86400 == 0
+
+
+def test_backup_and_download():
+    code, r = call("GET", "/api/admin/backup", query="token=secret")
+    assert code == 200 and r["backups"], r
+    import gzip, sqlite3
+    raw = gzip.decompress((server.BACKUP_DIR / r["backups"][-1]).read_bytes())
+    tmp = Path(TMP) / "restored.db"
+    tmp.write_bytes(raw)
+    n = sqlite3.connect(tmp).execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    assert n >= 6                                   # копия читается и содержит участников
+    code, data = call("GET", "/api/admin/db", query="token=secret")
+    assert code == 200 and data[:15] == b"SQLite format 3"
+    code, _ = call("GET", "/api/admin/db", query="token=bad")
+    assert code == 403
+
+
+def test_random_tasks_and_pangram():
+    import random
+    from keyml import corpus
+    ru = corpus.CALIB["ru"].lower()
+    assert set("абвгдеёжзийклмнопрстуфхцчшщъыьэюя") <= set(ru)
+    r = random.Random(0)
+    t1, t2 = corpus.random_task("ru", r), corpus.random_task("ru", r)
+    assert t1 != t2 and len(t1) >= 70 and all(w in corpus.FREQ_WORDS["ru"] for w in t1.split())
 
 
 if __name__ == "__main__":
@@ -208,5 +233,7 @@ if __name__ == "__main__":
     test_cheat_probability_interval()
     test_server_flow()
     test_daily_limit_and_debug()
+    test_backup_and_download()
+    test_random_tasks_and_pangram()
     test_torch_models()
     print("all tests passed")

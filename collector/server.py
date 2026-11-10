@@ -7,7 +7,10 @@ WSGI-приложение `application` можно запускать:
   * через gunicorn:      gunicorn collector.server:application
 
 Переменные окружения:
-  KT_DB             путь к SQLite (по умолчанию collector/data/keystrokes.db)
+  KT_DB             путь к SQLite (по умолчанию ~/trainkey_data/keystrokes.db — ВНЕ папки проекта,
+                    чтобы повторный git clone / удаление проекта не стирали данные)
+  KT_BACKUP_HOURS   как часто делать сжатую копию базы в ~/trainkey_data/backups (по умолчанию 24)
+  KT_BACKUP_KEEP    сколько последних копий хранить (по умолчанию 7)
   KT_ADMIN_TOKEN    токен для выгрузки данных (/api/admin/export?token=...)
   KT_MAX_SESSIONS_PER_DAY  сколько обычных сессий участник может начать за календарные сутки (по умолчанию 3; 0 — без лимита)
   KT_TZ_OFFSET_HOURS       часовой пояс для границы суток (по умолчанию 3 — Минск)
@@ -17,6 +20,8 @@ WSGI-приложение `application` можно запускать:
 """
 from __future__ import annotations
 
+import contextlib
+import gzip
 import json
 import math
 import mimetypes
@@ -39,15 +44,21 @@ from keyml.data import Attempt, events_to_keystrokes  # noqa: E402
 from keyml.profile import (BigramPrior, adaptive_exercise, bigram_latencies,  # noqa: E402
                            key_errors, user_profile)
 
-DB_PATH = Path(os.environ.get("KT_DB", HERE / "data" / "keystrokes.db"))
+DATA_DIR = Path.home() / "trainkey_data"
+DB_PATH = Path(os.environ.get("KT_DB") or DATA_DIR / "keystrokes.db")
+LEGACY_DB = HERE / "data" / "keystrokes.db"          # старое место (внутри проекта)
+BACKUP_DIR = DB_PATH.parent / "backups"
+BACKUP_HOURS = float(os.environ.get("KT_BACKUP_HOURS", "24"))
+BACKUP_KEEP = int(os.environ.get("KT_BACKUP_KEEP", "7"))
 ADMIN_TOKEN = os.environ.get("KT_ADMIN_TOKEN", "change-me")
 MAX_PER_DAY = int(os.environ.get("KT_MAX_SESSIONS_PER_DAY", "3"))
 TZ_OFFSET_H = float(os.environ.get("KT_TZ_OFFSET_HOURS", "3"))
 DEBUG_TOKEN = os.environ.get("KT_DEBUG_TOKEN", "")
 STATIC = HERE / "static"
 MAX_BODY = 2_000_000
-CALIB_REPS = 10
-TEXTS_PER_SESSION = 6
+CALIB_REPS = 6            # полная панграмма × 6 (фиксированный текст для биометрии)
+TEXTS_PER_SESSION = 6     # случайные задания из частотных слов
+SESSION_SIZE = CALIB_REPS + TEXTS_PER_SESSION
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -63,19 +74,83 @@ CREATE INDEX IF NOT EXISTS idx_att_user ON attempts(user_id);
 """
 
 
+@contextlib.contextmanager
 def db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(DB_PATH), timeout=10)
+    """Соединение с SQLite: коммит при успехе, откат при ошибке, всегда закрытие."""
+    con = sqlite3.connect(str(DB_PATH), timeout=15)
     con.row_factory = sqlite3.Row
-    return con
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
-with db() as _c:
-    _c.executescript(SCHEMA)
-    try:   # миграция старых баз: отметка отладочных сессий
-        _c.execute("ALTER TABLE sessions ADD COLUMN debug INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
+def _sqlite_copy(src: Path, dst: Path):
+    """Консистентная копия «на ходу» через backup API SQLite (не просто копирование файла)."""
+    s, d = sqlite3.connect(str(src)), sqlite3.connect(str(dst))
+    try:
+        s.backup(d)
+    finally:
+        s.close()
+        d.close()
+
+
+_backup_lock = threading.Lock()
+_last_backup = 0.0
+
+
+def backup_now(force: bool = False) -> Path | None:
+    """Сжатая копия базы раз в BACKUP_HOURS; хранятся BACKUP_KEEP последних."""
+    global _last_backup
+    if not DB_PATH.exists() or BACKUP_HOURS <= 0:
+        return None
+    with _backup_lock:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        olds = sorted(BACKUP_DIR.glob("keystrokes-*.db.gz"))
+        newest = olds[-1].stat().st_mtime if olds else 0.0
+        _last_backup = max(_last_backup, newest)
+        if not force and time.time() - _last_backup < BACKUP_HOURS * 3600:
+            return None
+        tmp = BACKUP_DIR / "tmp-backup.db"
+        _sqlite_copy(DB_PATH, tmp)
+        out = BACKUP_DIR / time.strftime("keystrokes-%Y%m%d-%H%M%S.db.gz")
+        with open(tmp, "rb") as fi, gzip.open(out, "wb") as fo:
+            fo.write(fi.read())
+        tmp.unlink()
+        _last_backup = time.time()
+        for f in sorted(BACKUP_DIR.glob("keystrokes-*.db.gz"))[:-BACKUP_KEEP]:
+            f.unlink()
+        return out
+
+
+def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # переезд: база из старого места внутри проекта копируется в новое один раз
+    if not DB_PATH.exists() and LEGACY_DB.exists() and LEGACY_DB.resolve() != DB_PATH.resolve():
+        _sqlite_copy(LEGACY_DB, DB_PATH)
+        print(f"База перенесена: {LEGACY_DB} -> {DB_PATH}")
+    con = sqlite3.connect(str(DB_PATH), timeout=15)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")   # чтение не блокирует запись
+        con.executescript(SCHEMA)
+        try:   # миграция старых баз: отметка отладочных сессий
+            con.execute("ALTER TABLE sessions ADD COLUMN debug INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        con.commit()
+    finally:
+        con.close()
+    try:
+        backup_now()
+    except Exception as e:  # резервная копия не должна ронять сервер
+        print("backup failed:", e)
+
+
+init_db()
 
 
 def is_debug(token) -> bool:
@@ -239,14 +314,15 @@ def api_me(body, q):
         done = sessions_done(con, uid)
         debug = is_debug(q.get("debug", [""])[0])
         today = sessions_today(con, uid)
-        complete_last = not done or done[-1]["attempts"] >= CALIB_REPS + TEXTS_PER_SESSION
+        complete_last = not done or done[-1]["attempts"] >= SESSION_SIZE
         limit_hit = (not debug and MAX_PER_DAY > 0 and today >= MAX_PER_DAY and complete_last)
         wait = day_bounds()[1] - time.time() if limit_hit else 0.0
         best = con.execute("SELECT MAX(wpm) FROM attempts WHERE user_id=? AND mode='normal' AND kind='text' "
                            "AND acc>=0.9", (uid,)).fetchone()[0]
     return 200, {"user_id": uid, "nickname": u["nickname"], "meta": json.loads(u["meta"] or "{}"),
                  "sessions": done, "wait_seconds": int(wait), "best_wpm": best,
-                 "sessions_today": today, "max_per_day": MAX_PER_DAY, "debug": debug}
+                 "sessions_today": today, "max_per_day": MAX_PER_DAY, "debug": debug,
+                 "session_size": SESSION_SIZE}
 
 
 def api_session_start(body, q):
@@ -261,7 +337,7 @@ def api_session_start(body, q):
         meta = json.loads(u["meta"] or "{}")
         lang = meta.get("lang", "ru") if meta.get("lang") in ("ru", "en") else "ru"
         done = sessions_done(con, uid)
-        incomplete = mode == "normal" and done and done[-1]["attempts"] < CALIB_REPS + TEXTS_PER_SESSION
+        incomplete = mode == "normal" and done and done[-1]["attempts"] < SESSION_SIZE
         if incomplete:
             # незаконченную сессию продолжаем, а не начинаем новую
             sno = done[-1]["session_no"]
@@ -278,8 +354,8 @@ def api_session_start(body, q):
         reps = CALIB_REPS if mode == "normal" else 4
         plan = [{"kind": "calib", "lang": lang, "prompt": corpus.CALIB[lang]} for _ in range(reps)]
         rng = random.Random(f"{uid}-{sno}-{mode}")
-        for t in rng.sample(corpus.TEXTS[lang], TEXTS_PER_SESSION):
-            plan.append({"kind": "text", "lang": lang, "prompt": t})
+        for _ in range(TEXTS_PER_SESSION):      # случайные слова из частотного словаря
+            plan.append({"kind": "text", "lang": lang, "prompt": corpus.random_task(lang, rng)})
         if mode == "normal" and sno > 1:
             prof = build_profile(con, uid, lang)
             if prof.get("exercise"):
@@ -332,6 +408,10 @@ def api_attempt(body, q):
              str(body.get("cheat_type") or "")[:40] or None,
              json.dumps(body.get("client") or {})[:2000], time.time(), wpm, acc, score))
     note = "синтетические события (isTrusted=false)" if untrusted else None
+    try:
+        backup_now()        # раз в KT_BACKUP_HOURS — сжатая копия базы
+    except Exception as e:
+        print("backup failed:", e)
     return 200, {"wpm": wpm, "acc": acc, "p_cheat": cheat["p"] if cheat else None,
                  "p_cheat_ci90": [cheat["lo"], cheat["hi"]] if cheat else None, "note": note}
 
@@ -378,6 +458,29 @@ def api_admin_summary(body, q):
     return 200, {"users": users}
 
 
+def admin_db_download(q, start_response):
+    """Вся база одним файлом (консистентная копия) — /api/admin/db?token=..."""
+    if not _check_admin(q):
+        start_response("403 Forbidden", [("Content-Type", "text/plain")])
+        return [b"forbidden"]
+    tmp = DB_PATH.parent / f"download-{secrets.token_hex(4)}.db"
+    _sqlite_copy(DB_PATH, tmp)
+    data = tmp.read_bytes()
+    tmp.unlink()
+    start_response("200 OK", [("Content-Type", "application/vnd.sqlite3"),
+                              ("Content-Disposition", "attachment; filename=keystrokes.db"),
+                              ("Content-Length", str(len(data)))])
+    return [data]
+
+
+def api_admin_backup(body, q):
+    if not _check_admin(q):
+        return 403, {"error": "forbidden"}
+    out = backup_now(force=True)
+    files = sorted(p.name for p in BACKUP_DIR.glob("keystrokes-*.db.gz"))
+    return 200, {"created": out.name if out else None, "backups": files, "db": str(DB_PATH)}
+
+
 def admin_export(q, start_response):
     if not _check_admin(q):
         start_response("403 Forbidden", [("Content-Type", "text/plain")])
@@ -407,6 +510,7 @@ ROUTES = {
     ("GET", "/api/profile"): api_profile,
     ("GET", "/api/leaderboard"): api_leaderboard,
     ("GET", "/api/admin/summary"): api_admin_summary,
+    ("GET", "/api/admin/backup"): api_admin_backup,
 }
 
 
@@ -418,6 +522,8 @@ def application(environ, start_response):
     try:
         if path == "/api/admin/export":
             return admin_export(q, start_response)
+        if path == "/api/admin/db":
+            return admin_db_download(q, start_response)
         handler = ROUTES.get((method, path))
         if handler:
             body = {}
@@ -462,15 +568,46 @@ def _static(path, start_response):
     return [data]
 
 
-if __name__ == "__main__":
+def serve(port: int = 8000, open_browser: bool = False, tries: int = 10):
+    """Локальный запуск: сервер + веб-приложение на одном порту. Если порт занят — берётся следующий."""
+    import webbrowser
     from socketserver import ThreadingMixIn
-    from wsgiref.simple_server import WSGIServer, make_server
+    from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
     class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
         daemon_threads = True
 
-    port = int(os.environ.get("PORT", "8000"))
-    srv = make_server("0.0.0.0", port, application, server_class=ThreadingWSGIServer)
-    print(f"TrainKey: http://localhost:{port}   (база: {DB_PATH})")
-    print(f"Режим читера: http://localhost:{port}/?cheat=1")
-    srv.serve_forever()
+    class QuietHandler(WSGIRequestHandler):
+        def log_request(self, code="-", size="-"):   # пишем в консоль только ошибки
+            if str(code)[0] in "45":
+                super().log_request(code, size)
+
+    for p in range(port, port + tries):
+        try:
+            srv = make_server("127.0.0.1", p, application, server_class=ThreadingWSGIServer,
+                              handler_class=QuietHandler)
+            break
+        except OSError:
+            continue
+    else:
+        raise SystemExit(f"Порты {port}-{port + tries - 1} заняты")
+    url = f"http://localhost:{p}/"
+    print("=" * 60)
+    print(f" TrainKey запущен:   {url}")
+    print(f" Режим читера:       {url}?cheat=1")
+    if DEBUG_TOKEN:
+        print(f" Режим отладки:      {url}?debug={DEBUG_TOKEN}")
+    print(f" База данных:        {DB_PATH}")
+    print(f" Античит:            {'включён' if ANTICHEAT.ok else 'выключен (нет numpy или модели)'}")
+    print(" Остановить: Ctrl+C или закрыть это окно")
+    print("=" * 60)
+    if open_browser:
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nСервер остановлен.")
+
+
+if __name__ == "__main__":
+    serve(int(os.environ.get("PORT", "8000")))

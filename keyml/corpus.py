@@ -1,10 +1,11 @@
 """Тексты для тренажёра. Все предложения написаны для проекта (без чужих текстов)."""
 
-# Калибровочные фразы печатаются по 10 раз за сессию — на них учится биометрическая
-# верификация (фиксированный текст = сравнимые вектора таймингов, как в датасете CMU).
+# Калибровочные фразы — полные панграммы (все буквы алфавита). Печатаются по CALIB_REPS раз
+# за сессию: на фиксированном тексте учится биометрическая верификация
+# (сравнимые векторы таймингов одинаковой длины, как в датасете CMU).
 CALIB = {
-    "ru": "съешь же ещё этих мягких булок",
-    "en": "the quick brown fox jumps over the lazy dog",
+    "ru": "Съешь же ещё этих мягких французских булок, да выпей чаю.",
+    "en": "The quick brown fox jumps over the lazy dog.",
 }
 
 TEXTS = {
@@ -89,3 +90,48 @@ us model data train test error feature value learn speed finger quick brown jump
 keyboard practice network vector matrix gradient random forest sample label class score
 quiz jazz zebra fizz buzz exact extra squeeze puzzle wizard oxygen lynx sphinx crypt""".split(),
 }
+
+
+# Самые частотные слова (словоформы) — из них собираются случайные задания.
+# Короткие служебные слова оставлены: они дают самые частые биграммы реальной печати.
+FREQ_WORDS = {
+    "ru": """и в не на я что он с это а как по но они к у мы из за вы так же от все она
+то для ты бы только его если уже когда был нет да вот было или где там еще ее мне их до
+был тоже чтобы при ну даже под меня потом может очень себя тут без тебя есть него можно
+сейчас надо много чем время после были кто раз здесь нас всё через этого них ничего
+теперь со год два день жизнь дело человек люди рука глаза голова слово место дом мир
+лицо друг сторона вопрос работа страна город земля вода конец случай час минута путь
+ночь утро вечер стол дверь окно книга машина школа деньги сила система история
+хорошо больше просто сразу снова всегда никогда опять почти совсем вместе почему
+сказал знать мочь стать говорить видеть идти думать хотеть делать сделать дать взять
+жить понять помнить сидеть стоять смотреть любить ждать спросить ответить решить
+начать прийти найти пойти работать писать читать играть сказать знаю могу хочу
+новый большой первый последний хороший главный другой старый молодой маленький
+белый черный долгий важный простой полный высокий русский каждый такой который
+какой свой весь этот тот один три пять сто первый второй сегодня завтра вчера
+быстро медленно тихо громко рядом далеко внизу наверх вперед назад справа слева
+мама папа брат сестра сын дочь отец мать семья ребенок девушка парень учитель
+студент урок экзамен задача ответ пример число буква текст клавиша палец""".split(),
+    "en": """the be to of and a in that have i it for not on with he as you do at this but his
+by from they we say her she or an will my one all would there their what so up out if
+about who get which go me when make can like time no just him know take people into year
+your good some could them see other than then now look only come its over think also back
+after use two how our work first well way even new want because any these give day most
+us is was are been has had did said made went came took got know thought told found
+man woman child world life hand part place case week company system program question
+government number night point home water room mother area money story fact month lot
+right study book eye job word business issue side kind head house service friend father
+power hour game line end member law car city community name team minute idea kid body
+small large next early young important few public bad same able great little long""".split(),
+}
+
+
+def random_task(lang: str, rng, min_chars: int = 70, max_words: int = 16) -> str:
+    """Случайное задание из частотных слов: ~70+ символов, без повторов слов подряд."""
+    pool = FREQ_WORDS[lang]
+    words: list[str] = []
+    while len(" ".join(words)) < min_chars and len(words) < max_words:
+        w = rng.choice(pool)
+        if not words or w != words[-1]:
+            words.append(w)
+    return " ".join(words)

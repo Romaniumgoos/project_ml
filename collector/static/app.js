@@ -70,7 +70,7 @@ async function openHome() {
   $("btnLogout").classList.remove("hidden");
   $("helloName").textContent = `Привет, ${S.me.nickname}!`;
   $("myCode").textContent = S.uid;
-  const done = S.me.sessions.filter(s => s.attempts >= 16).length;
+  const done = S.me.sessions.filter(s => s.attempts >= (S.me.session_size || 12)).length;
   $("sessionDots").innerHTML = Array.from({ length: Math.max(3, done + 1) }, (_, k) => k + 1).map(i => `<div class="dot ${i <= done ? "done" : ""}">${i}</div>`).join("");
   $("cheatTypeRow").style.display = CHEAT ? "" : "none";
   const btn = $("btnStart");
@@ -83,7 +83,7 @@ async function openHome() {
       + `через ${fmtWait(S.me.wait_seconds)} (после полуночи) — данные из разных дней особенно ценны.`;
   } else {
     const left = S.me.max_per_day > 0 ? S.me.max_per_day - S.me.sessions_today : null;
-    $("startHint").textContent = `Сессия ${done + 1}: калибровочная фраза ×10 и несколько текстов (~6 минут). `
+    $("startHint").textContent = `Сессия ${done + 1}: фраза из всех букв алфавита ×6 и 6 заданий из частых слов (~5 минут). `
       + (S.me.debug ? "Режим отладки: лимит сессий отключён."
          : left !== null ? `Сегодня можно пройти ещё ${left} из ${S.me.max_per_day}.` : "");
   }
@@ -172,7 +172,7 @@ function nextAttempt() {
   const kindName = { calib: "Калибровочная фраза", text: "Текст", adaptive: "Персональное упражнение" }[item.kind];
   const nCalib = S.offset + S.plan.filter(p => p.kind === "calib").length;
   $("stageLabel").textContent = item.kind === "calib"
-    ? `${kindName} — повтор ${n} из ${nCalib}` : `${kindName} · задание ${n} из ${S.total}`;
+    ? `${kindName} (все буквы алфавита) — повтор ${n} из ${nCalib}` : `${kindName} · задание ${n} из ${S.total}`;
   $("progBar").style.width = `${100 * (n - 1) / S.total}%`;
   $("liveWpm").textContent = "0";
   $("typeHint").classList.remove("hidden");

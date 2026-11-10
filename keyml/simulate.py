@@ -158,7 +158,7 @@ class SimUser:
         return events
 
 
-def simulate_users(n_users: int = 40, n_sessions: int = 3, calib_reps: int = 10,
+def simulate_users(n_users: int = 40, n_sessions: int = 3, calib_reps: int = 6,
                    texts_per_session: int = 8, seed: int = 0) -> tuple[list[Attempt], list[SimUser]]:
     rng = random.Random(seed)
     users = [SimUser.random(f"sim{u:03d}", seed * 1000 + u) for u in range(n_users)]
@@ -173,7 +173,7 @@ def simulate_users(n_users: int = 40, n_sessions: int = 3, calib_reps: int = 10,
                                         corpus.CALIB[lang], ev, typed=corpus.CALIB[lang],
                                         source="sim", label=0))
                 aid += 1
-            for txt in rng.sample(corpus.TEXTS[lang], texts_per_session):
+            for txt in [corpus.random_task(lang, rng) for _ in range(texts_per_session)]:
                 ev = u.type_text(txt, lang, s, 0, rng)
                 attempts.append(Attempt(f"s{aid}", u.user_id, s, "text", lang, txt, ev,
                                         typed=txt, source="sim", label=0))
