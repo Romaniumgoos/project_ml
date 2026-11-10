@@ -4,3 +4,4 @@ collector/data/
 data/*.jsonl
 .pytest_cache/
 *.zip
+data/external/

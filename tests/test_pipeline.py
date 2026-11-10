@@ -227,6 +227,36 @@ def test_random_tasks_and_pangram():
     assert t1 != t2 and len(t1) >= 70 and all(w in corpus.FREQ_WORDS["ru"] for w in t1.split())
 
 
+def test_external_loaders():
+    """Загрузчики CMU и Aalto на маленьких файлах того же формата."""
+    import zipfile
+    from keyml.external import load_cmu, reorder_like_ours, load_aalto
+    cmu = Path(TMP) / "cmu.csv"
+    cmu.write_text("subject,sessionIndex,rep,H.a,DD.a.b,UD.a.b,H.b\n"
+                   "s002,1,1,0.1,0.3,0.2,0.12\ns003,1,1,0.09,0.25,0.16,0.11\n")
+    X, subj, sess, rep, cols = load_cmu(cmu)
+    assert X.shape == (2, 4) and abs(X[0, 0] - 100) < 1e-9          # секунды -> мс
+    Xo = reorder_like_ours(X, cols)
+    assert list(Xo[0]) == [100.0, 120.0, 300.0, 200.0]               # [H..., DD..., UD...]
+    hdr = "PARTICIPANT_ID\tTEST_SECTION_ID\tSENTENCE\tUSER_INPUT\tKEYSTROKE_ID\tPRESS_TIME\tRELEASE_TIME\tLETTER\tKEYCODE\n"
+    rows, t = [], 1000
+    for sec in (1, 2):
+        for ch in "hello world again":
+            kc = 32 if ch == " " else ord(ch.upper())
+            rows.append(f"7\t{sec}\thello world again\thello world again\t1\t{t}\t{t + 90}\t{ch}\t{kc}\n")
+            t += 150
+    meta = "PARTICIPANT_ID\tLAYOUT\tKEYBOARD_TYPE\tFINGERS\n7\tqwerty\tfull\t9-10\n8\tazerty\tfull\t1-2\n"
+    zp = Path(TMP) / "Keystrokes.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr("Keystrokes/files/7_keystrokes.txt", hdr + "".join(rows))
+        z.writestr("Keystrokes/files/8_keystrokes.txt", hdr + "".join(rows).replace("7\t", "8\t"))
+        z.writestr("Keystrokes/files/metadata_participants.txt", meta)
+    atts = load_aalto(zp, 10)
+    assert {a.user_id for a in atts} == {"aalto7"}                   # AZERTY отфильтрован
+    assert len(atts) == 2 and atts[0].keystrokes()[0].code == "KeyH" and atts[0].keystrokes()[0].hold == 90
+    assert atts[0].flags["user_meta"]["FINGERS"] == "9-10"
+
+
 if __name__ == "__main__":
     test_metrics()
     test_own_models_match_sklearn()
@@ -235,5 +265,6 @@ if __name__ == "__main__":
     test_daily_limit_and_debug()
     test_backup_and_download()
     test_random_tasks_and_pangram()
+    test_external_loaders()
     test_torch_models()
     print("all tests passed")

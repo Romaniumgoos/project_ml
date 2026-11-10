@@ -150,18 +150,26 @@ class BotInstance:
 
 def generate_bots(n_instances_per_type: int = 6, attempts_per_instance: int = 12,
                   human_pool: list[Attempt] | None = None, bigram_mu=None, key_hold_mu=None,
-                  types=BOT_TYPES, seed: int = 123) -> list[Attempt]:
+                  types=BOT_TYPES, seed: int = 123, prompts: list[tuple[str, str]] | None = None,
+                  ru_share: float = 0.8) -> list[Attempt]:
+    """prompts: необязательный список (язык, текст) — тогда боты печатают именно эти тексты
+    (например, предложения из датасета Aalto, чтобы тексты людей и ботов не различались)."""
     rng = random.Random(seed)
     out, aid = [], 0
     for t in types:
         for k in range(n_instances_per_type):
             bot = BotInstance(t, seed * 1000 + k * 7 + BOT_TYPES.index(t) * 101, human_pool, bigram_mu, key_hold_mu)
-            lang = "ru" if rng.random() < 0.8 else "en"
+            lang = "ru" if rng.random() < ru_share else "en"
             for j in range(attempts_per_instance):
-                kind = "calib" if j % 2 == 0 else "text"
-                prompt = corpus.CALIB[lang] if kind == "calib" else corpus.random_task(lang, rng)
-                ev = bot.type_text(prompt, lang)
-                out.append(Attempt(f"b{aid}", bot.id, 1, kind, lang, prompt, ev, typed=prompt,
+                if prompts:
+                    lang_j, prompt = rng.choice(prompts)
+                    kind = "text"
+                else:
+                    lang_j = lang
+                    kind = "calib" if j % 2 == 0 else "text"
+                    prompt = corpus.CALIB[lang] if kind == "calib" else corpus.random_task(lang, rng)
+                ev = bot.type_text(prompt, lang_j)
+                out.append(Attempt(f"b{seed}-{aid}", bot.id, 1, kind, lang_j, prompt, ev, typed=prompt,
                                    mode="cheat", cheat_type=t, source="bot", label=1, bot_type=t))
                 aid += 1
     return out
