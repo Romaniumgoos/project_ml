@@ -3,13 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>КлавоТрен — клавиатурный тренажёр</title>
+<title>TrainKey — клавиатурный тренажёр</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header>
-  <div class="logo">Клаво<span>Трен</span></div>
-  <div id="whoami" class="muted"></div>
+  <div class="logo">Train<span>Key</span></div>
+  <div class="row user-box">
+    <div id="whoami" class="muted"></div>
+    <button id="btnLogout" class="small hidden" title="Выйти, чтобы войти под другим кодом">Выйти</button>
+  </div>
 </header>
 <div id="debugBanner" class="debug-banner hidden">РЕЖИМ ОТЛАДКИ — лимит 3 сессии в день отключён, попытки помечаются флагом debug.</div>
 <div id="cheatBanner" class="cheat-banner hidden">
@@ -110,7 +113,8 @@
   </div>
   <div class="grid2">
     <div class="card"><h3>Ваши слабые места</h3><div id="profileBox" class="muted">Появится после первой сессии.</div></div>
-    <div class="card"><h3>Таблица лидеров</h3><div id="leaderBox"></div></div>
+    <div class="card"><h3>Таблица лидеров</h3><div id="leaderBox"></div>
+      <p class="muted small-text">Учитываются тексты (не калибровка) с точностью от 90% и вероятностью читерства ниже 50%.</p></div>
   </div>
 </section>
 
@@ -123,7 +127,9 @@
     </div>
     <div class="progress"><div id="progBar"></div></div>
     <div id="prompt" class="prompt" tabindex="0"></div>
-    <div id="typeHint" class="muted center">Просто начинайте печатать. Ошибки исправляйте Backspace.</div>
+    <div id="typeHint" class="muted center">Просто начинайте печатать. Ошибки исправляйте Backspace (Ctrl+Backspace — стереть слово).</div>
+    <div id="cheatCopyRow" class="center hidden"><button id="btnCopyPrompt" class="small">Скопировать текст задания</button>
+      <span class="muted">— затем нажмите F8 в скрипте-читере</span></div>
     <div id="layoutWarn" class="warn hidden">Похоже, включена не та раскладка клавиатуры — переключите её.</div>
     <div id="lastResult" class="muted center"></div>
   </div>

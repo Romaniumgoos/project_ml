@@ -67,6 +67,7 @@ async function openHome() {
   $("debugBanner").classList.toggle("hidden", !S.me.debug);
   show("scrHome");
   $("whoami").textContent = `${S.me.nickname} · ${S.uid}`;
+  $("btnLogout").classList.remove("hidden");
   $("helloName").textContent = `Привет, ${S.me.nickname}!`;
   $("myCode").textContent = S.uid;
   const done = S.me.sessions.filter(s => s.attempts >= 16).length;
@@ -139,6 +140,26 @@ $("btnStart").addEventListener("click", async () => {
 });
 $("btnHome").addEventListener("click", openHome);
 
+// выход: забываем код в этом браузере и показываем регистрацию / вход под другим кодом
+$("btnLogout").addEventListener("click", () => {
+  if (S.uid && !confirm(`Выйти из аккаунта ${S.uid}? Чтобы вернуться, понадобится этот код.`)) return;
+  try { localStorage.removeItem("kt_uid"); } catch (e) {}
+  Object.assign(S, { uid: null, me: null, plan: [], idx: 0, att: null, results: [] });
+  $("whoami").textContent = "";
+  $("btnLogout").classList.add("hidden");
+  $("debugBanner").classList.add("hidden");
+  $("regForm").reset();
+  show("scrWelcome");
+});
+
+// режим читера: кнопка копирует текст задания для внешнего скрипта (tools/cheat_scripts)
+$("btnCopyPrompt").addEventListener("click", async () => {
+  if (!S.att) return;
+  try { await navigator.clipboard.writeText(S.att.item.prompt); $("btnCopyPrompt").textContent = "Скопировано ✓"; }
+  catch (e) { alert("Не удалось скопировать — выделите текст задания мышью и нажмите Ctrl+C."); }
+  $("btnCopyPrompt").blur();
+});
+
 // ================================================================ печать
 const CYR = /[а-яё]/i, LAT = /[a-z]/i;
 
@@ -155,6 +176,8 @@ function nextAttempt() {
   $("progBar").style.width = `${100 * (n - 1) / S.total}%`;
   $("liveWpm").textContent = "0";
   $("typeHint").classList.remove("hidden");
+  $("cheatCopyRow").classList.toggle("hidden", !CHEAT);
+  $("btnCopyPrompt").textContent = "Скопировать текст задания";
   render();
   $("prompt").focus();
 }
@@ -195,7 +218,10 @@ window.addEventListener("keydown", (e) => {
   a.lastDown = now;
   if (!a.started) { a.started = true; a.firstDown = now; $("typeHint").classList.add("hidden"); }
   rec("d", e);
-  if (e.key === "Backspace") {
+  if (e.key === "Backspace" && (e.ctrlKey || e.metaKey)) {
+    // Ctrl+Backspace: стираем слово целиком (сначала пробелы перед курсором, затем само слово)
+    a.typed = a.typed.replace(/\s+$/, "").replace(/\S+$/, "");
+  } else if (e.key === "Backspace") {
     a.typed = a.typed.slice(0, -1);
   } else if (e.key.length === 1) {
     const exp = a.item.prompt[a.typed.length] || "";

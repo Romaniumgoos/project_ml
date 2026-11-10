@@ -31,6 +31,9 @@ input, select, button { font: inherit; padding: 8px 10px; border: 1px solid var(
 button { cursor: pointer; }
 button.primary { background: var(--accent); color: #fff; border: none; padding: 10px 22px; font-weight: 600; }
 button.big { font-size: 18px; padding: 14px 32px; margin-top: 8px; }
+.user-box { gap: 8px; }
+button.small { padding: 4px 10px; font-size: 13px; }
+.small-text { font-size: 12px; margin: 8px 0 0; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 details { margin-top: 16px; }
 .code { font-family: ui-monospace, Consolas, monospace; letter-spacing: 1px; }

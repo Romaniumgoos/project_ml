@@ -471,6 +471,6 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", "8000"))
     srv = make_server("0.0.0.0", port, application, server_class=ThreadingWSGIServer)
-    print(f"Тренажёр: http://localhost:{port}   (база: {DB_PATH})")
+    print(f"TrainKey: http://localhost:{port}   (база: {DB_PATH})")
     print(f"Режим читера: http://localhost:{port}/?cheat=1")
     srv.serve_forever()
